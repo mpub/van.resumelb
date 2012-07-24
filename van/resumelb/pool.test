@@ -1,0 +1,232 @@
+Versioned Pools
+---------------
+
+A versioned pool is a "pool of pools" where each sub-pool contains only workers
+of a specific version. The request classifier decides which version the request
+is for by returning a tuple of (version, classifier).
+
+Let's create a pool to test:
+
+    >>> import van.resumelb
+    >>> pool = van.resumelb.Pool()
+
+And a test worker:
+
+    >>> class Worker:
+    ...     oldest_time = None
+    ...     def __init__(self, name, version):
+    ...         self.__name__ = name
+    ...         self.version = version
+    ...     def __repr__(self):
+    ...         return self.__name__
+    ...     def __cmp__(self, other):
+    ...         return cmp(self.__name__, other.__name__)
+    ...     def __hash__(self):
+    ...         return hash(self.__name__)
+    ...     def handle(self, *args):
+    ...         pass
+
+    >>> w1 = Worker('w1', 'odd')
+
+With no workers and no pools we get None on calling get():
+
+    >>> pool.get(('even', 'foo'), 0.0)
+
+A sub-pool was created:
+
+    >>> pool
+    Versioned Pool
+      sub-pools: 1
+      backlog: 0
+    Sub-Pool: even
+      Request classes:
+      Backlogs:
+        overall backlog: 0 Decayed: 0 Avg: None
+
+Let's add a worker:
+
+    >>> pool.new_resume(w1, {})
+
+For odd now we are getting w1:
+
+    >>> pool.get(('odd', 'foo'), 0.0)
+    w1
+
+Add an even worker now:
+
+    >>> w2 = Worker('w2', 'even')
+    >>> pool.new_resume(w2, {})
+
+This resulted in a new pool:
+
+    >>> pool # doctest: +ELLIPSIS
+    Versioned Pool
+      sub-pools: 2
+      backlog: 1
+    Sub-Pool: even
+      Request classes:
+      Backlogs:
+        overall backlog: 0 ...
+        0: [w2]
+    Sub-Pool: odd
+      Request classes:
+        foo: w1(1.0,1.0)
+      Backlogs:
+        overall backlog: 1 ...
+        1: [w1]
+
+    >>> pool.get(('even', 'foo'), 0.0)
+    w2
+    >>> pool.get(('odd', 'foo'), 0.0)
+    w1
+
+By now we have a backlog:
+
+    >>> pool.backlog
+    3
+
+Let's have a look inside: 
+
+    >>> pool # doctest: +ELLIPSIS
+    Versioned Pool
+      sub-pools: 2
+      backlog: 3
+    Sub-Pool: even
+      Request classes:
+        foo: w2(...)
+      Backlogs:
+        overall backlog: 1 ...
+        1: [w2]
+    Sub-Pool: odd
+      Request classes:
+        foo: w1(...)
+      Backlogs:
+        overall backlog: 2 ...
+        2: [w1]
+
+Let's finish off one of the w1 requests, the backlog of the versioned pool and
+sub pool are updated:
+
+    >>> pool.put(w1)
+    >>> pool # doctest: +ELLIPSIS
+    Versioned Pool
+      sub-pools: 2
+      backlog: 2
+    Sub-Pool: even
+      Request classes:
+        foo: w2(...)
+      Backlogs:
+        overall backlog: 1 ...
+        1: [w2]
+    Sub-Pool: odd
+      Request classes:
+        foo: w1(...)
+      Backlogs:
+        overall backlog: 1 ...
+        1: [w1]
+
+Finish the last request to drop the backlog for w1 and the odd pool to zero:
+
+    >>> pool.put(w1)
+    >>> pool # doctest: +ELLIPSIS
+    Versioned Pool
+      sub-pools: 2
+      backlog: 1
+    Sub-Pool: even
+      Request classes:
+        foo: w2(...)
+      Backlogs:
+        overall backlog: 1 ...
+        1: [w2]
+    Sub-Pool: odd
+      Request classes:
+        foo: w1(...)
+      Backlogs:
+        overall backlog: 0 ...
+        0: [w1]
+
+If we remove w1 from the pool, the pool itself is NOT removed:
+
+    >>> pool.remove(w1)  
+    >>> pool # doctest: +ELLIPSIS
+    Versioned Pool
+      sub-pools: 2
+      backlog: 1
+    Sub-Pool: even
+      Request classes:
+        foo: w2(...)
+      Backlogs:
+        overall backlog: 1 ...
+        1: [w2]
+    Sub-Pool: odd
+      Request classes:
+        foo: 
+      Backlogs:
+        overall backlog: 0 ...
+
+We can also try getting requests for a None version:
+
+    >>> w_default = Worker('w_default', None)
+    >>> pool.new_resume(w_default, {})
+    >>> pool.get((None, 'foo'), 0.0)
+    w_default
+
+For compatibility reasons, we consider the version to be None when a string
+classifier is passed:
+
+    >>> pool.get('foo', 0.0)
+    w_default
+
+The None pool was also added:
+
+    >>> pool # doctest: +ELLIPSIS
+    Versioned Pool
+      sub-pools: 3
+      backlog: 3
+    Sub-Pool: None
+      Request classes:
+        foo: w_default(...)
+      Backlogs:
+        overall backlog: 2 ...
+        2: [w_default]
+    Sub-Pool: even
+      Request classes:
+        foo: w2(...)
+      Backlogs:
+        overall backlog: ...
+        1: [w2]
+    Sub-Pool: odd
+      Request classes:
+        foo: 
+      Backlogs:
+        overall backlog: 0 ...
+
+We can ask our pool for it's status to get an inside view:
+
+    >>> status = pool.status()
+    >>> from pprint import pprint
+    >>> pprint(status) # doctest: +ELLIPSIS 
+    {'backlog': 3,
+     'sub_pools': {None: {'backlog': 2,
+                          'mean_backlog': 1.51...,
+                          'workers': [{'backlog': 2,
+                                       'mbacklog': 1.51...,
+                                       'name': 'w_default',
+                                       'oldest_time': None,
+                                       'version': None}]},
+                   'even': {'backlog': 1,
+                            'mean_backlog': 1.0,
+                            'workers': [{'backlog': 1,
+                                         'mbacklog': 1.0,
+                                         'name': 'w2',
+                                         'oldest_time': None,
+                                         'version': 'even'}]},
+                   'odd': {'backlog': 0,
+                           'mean_backlog': 0.75...,
+                           'workers': []}}}
+
+The status is json serializable:
+
+    >>> import json
+    >>> json.dumps(status) # doctest: +ELLIPSIS
+    '...'
